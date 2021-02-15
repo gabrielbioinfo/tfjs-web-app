@@ -3,37 +3,32 @@ import {
     Alert, Button, Collapse, Container, Form, Spinner, ListGroup, Tabs, Tab
 } from 'react-bootstrap';
 import { FaCamera, FaChevronDown, FaChevronRight } from 'react-icons/fa';
-import { openDB } from 'idb';
 import Cropper  from 'react-cropper';
-import * as tf from '@tensorflow/tfjs';
 import LoadButton from '../components/LoadButton';
-import { MODEL_CLASSES } from '../model/classes';
-import config from '../config';
 import './Classify.css';
 import 'cropperjs/dist/cropper.css';
+import ModelClassifier from '../ai-models/ModelClassifier';
+import ModelImage from '../ai-models/ModelImage';
+import * as tf from '@tensorflow/tfjs';
 
-
-const MODEL_PATH = '/model/model.json';
 const IMAGE_SIZE = 224;
 const CANVAS_SIZE = 224;
 const TOPK_PREDICTIONS = 5;
 
-const INDEXEDDB_DB = 'tensorflowjs';
-const INDEXEDDB_STORE = 'model_info_store';
-const INDEXEDDB_KEY = 'web-model';
-
 /**
- * Class to handle the rendering of the Classify page.
+ * Class to handle the rendering of the NewClassify page.
  * @extends React.Component
  */
-export default class Classify extends Component {
+export default class NewClassify extends Component {
 
     constructor(props) {
         super(props);
 
-        this.webcam = null;
+        this.model = new ModelClassifier();
         this.model = null;
         this.modelLastUpdated = null;
+        this.webcam = null;
+
 
         this.state = {
             modelLoaded: false,
@@ -50,228 +45,75 @@ export default class Classify extends Component {
     }
 
     async componentDidMount() {
-        if (('indexedDB' in window)) {
-            try {
-                this.model = await tf.loadLayersModel('indexeddb://' + INDEXEDDB_KEY);
 
-                // Safe to assume tensorflowjs database and related object store exists.
-                // Get the date when the model was saved.
-                try {
-                    const db = await openDB(INDEXEDDB_DB, 1, );
-                    const item = await db.transaction(INDEXEDDB_STORE)
-                        .objectStore(INDEXEDDB_STORE)
-                        .get(INDEXEDDB_KEY);
-                    const dateSaved = new Date(item.modelArtifactsInfo.dateSaved);
-                    await this.getModelInfo();
-                    console.log(this.modelLastUpdated);
-                    if (!this.modelLastUpdated  || dateSaved >= new Date(this.modelLastUpdated).getTime()) {
-                        console.log('Using saved model');
-                    }
-                    else {
-                        this.setState({
-                            modelUpdateAvailable: true,
-                            showModelUpdateAlert: true,
-                        });
-                    }
-
-                }
-                catch (error) {
-                    console.warn(error);
-                    console.warn('Could not retrieve when model was saved.');
-                }
-
-            }
-                // If error here, assume that the object store doesn't exist and the model currently isn't
-                // saved in IndexedDB.
-            catch (error) {
-                console.log('Not found in IndexedDB. Loading and saving...');
-                console.log(error);
-                this.model = await tf.loadLayersModel(MODEL_PATH);
-                await this.model.save('indexeddb://' + INDEXEDDB_KEY);
-            }
-        }
-        // If no IndexedDB, then just download like normal.
-        else {
-            console.warn('IndexedDB not supported.');
-            this.model = await tf.loadLayersModel(MODEL_PATH);
-        }
+        this.model = new ModelClassifier();
+        await this.model.initModel();
 
         this.setState({ modelLoaded: true });
-        this.initWebcam();
-        // this.handleTabSelect('localfile');
+        await this.initWebcam(this.refs.webCam, this.refs.noWebcam);
 
-        // Warm up model.
-        let prediction = tf.tidy(() => this.model.predict(tf.zeros([1, IMAGE_SIZE, IMAGE_SIZE, 3])));
-        prediction.dispose();
+        await this.model.predict(tf.zeros([1, IMAGE_SIZE, IMAGE_SIZE, 3]));
     }
 
     async componentWillUnmount() {
-        if (this.webcam) {
-            this.webcam.stop();
-        }
-
-        // Attempt to dispose of the model.
-        try {
-            this.model.dispose();
-        }
-        catch (e) {
-            // Assume model is not loaded or already disposed.
-        }
+        this.webcam.stop();
+        this.model.dispose();
     }
 
-    initWebcam = async () => {
-        try {
-            this.webcam = await tf.data.webcam(
-                this.refs.webcam,
-                {resizeWidth: CANVAS_SIZE, resizeHeight: CANVAS_SIZE, facingMode: 'environment'}
-            );
-        }
-        catch (e) {
-            this.refs.noWebcam.style.display = 'block';
-        }
+    actionUpdateModel = async () => {
+        this.model = await this.updateModel();
     }
 
-    startWebcam = async () => {
-        if (this.webcam) {
-            this.webcam.start();
-        }
-    }
+    actionClassifyLocalImage = async () => {
 
-    stopWebcam = async () => {
-        if (this.webcam) {
-            this.webcam.stop();
-        }
-    }
-
-    getModelInfo = async () => {
-        await fetch(`${config.API_ENDPOINT}/model_info`, {
-            method: 'GET',
-        })
-            .then(async (response) => {
-                await response.json().then((data) => {
-                    this.modelLastUpdated = data.last_updated;
-                })
-                    .catch((err) => {
-                        console.log('Unable to get parse model info.');
-                    });
-            })
-            .catch((err) => {
-                console.log('Unable to get model info');
-            });
-    }
-
-    updateModel = async () => {
-        // Get the latest model from the server and refresh the one saved in IndexedDB.
-        console.log('Updating the model: ' + INDEXEDDB_KEY);
-        this.setState({ isDownloadingModel: true });
-        this.model = await tf.loadLayersModel(MODEL_PATH);
-        await this.model.save('indexeddb://' + INDEXEDDB_KEY);
-        this.setState({
-            isDownloadingModel: false,
-            modelUpdateAvailable: false,
-            showModelUpdateAlert: false,
-            showModelUpdateSuccess: true
-        });
-    }
-
-    classifyLocalImage = async () => {
         this.setState({ isClassifying: true });
 
         const croppedCanvas = this.refs.cropper.getCroppedCanvas();
-        const image = tf.tidy( () => tf.browser.fromPixels(croppedCanvas).toFloat());
 
         // Process and resize image before passing in to model.
-        const imageData = await this.processImage(image);
-        const resizedImage = tf.image.resizeBilinear(imageData, [IMAGE_SIZE, IMAGE_SIZE]);
+        const imageModel = new ModelImage();
+        const X = await imageModel.fitTransform(
+            {image: croppedCanvas, from:'canvas', width: IMAGE_SIZE, height: IMAGE_SIZE});
 
-        const logits = this.model.predict(resizedImage);
-        const probabilities = await logits.data();
-        const preds = await this.getTopKClasses(probabilities, TOPK_PREDICTIONS);
+        const y = await this.model.predict(X);
+        const predictions = this.model.getTopKClasses(y, TOPK_PREDICTIONS);
 
         this.setState({
-            predictions: preds,
+            predictions,
             isClassifying: false,
             photoSettingsOpen: !this.state.photoSettingsOpen
         });
 
-        // Draw thumbnail to UI.
-        const context = this.refs.canvas.getContext('2d');
-        const ratioX = CANVAS_SIZE / croppedCanvas.width;
-        const ratioY = CANVAS_SIZE / croppedCanvas.height;
-        const ratio = Math.min(ratioX, ratioY);
-        context.clearRect(0, 0, CANVAS_SIZE, CANVAS_SIZE);
-        context.drawImage(croppedCanvas, 0, 0,
-            croppedCanvas.width * ratio, croppedCanvas.height * ratio);
+        await imageModel.renderImageFromUpload(croppedCanvas, this.refs.canvas);
 
-        // Dispose of tensors we are finished with.
-        image.dispose();
-        imageData.dispose();
-        resizedImage.dispose();
-        logits.dispose();
+        imageModel.dispose();
+        this.model.dispose();
     }
 
-    classifyWebcamImage = async () => {
+    actionClassifyWebcamImage = async () => {
+
         this.setState({ isClassifying: true });
 
         const imageCapture = await this.webcam.capture();
 
-        const resized = tf.image.resizeBilinear(imageCapture, [IMAGE_SIZE, IMAGE_SIZE]);
-        const imageData = await this.processImage(resized);
-        const logits = this.model.predict(imageData);
-        const probabilities = await logits.data();
-        const preds = await this.getTopKClasses(probabilities, TOPK_PREDICTIONS);
+        const imageModel = new ModelImage();
+        const X = await imageModel.fitTransform(
+            {image: imageCapture, from: 'webcam', width: IMAGE_SIZE, height: IMAGE_SIZE});
+
+        const y = await this.model.predict(X);
+        const predictions = this.model.getTopKClasses(y, TOPK_PREDICTIONS);
 
         this.setState({
-            predictions: preds,
+            predictions,
             isClassifying: false,
             photoSettingsOpen: !this.state.photoSettingsOpen
         });
 
-        // Draw thumbnail to UI.
-        const tensorData = tf.tidy(() => imageCapture.toFloat().div(255));
-        await tf.browser.toPixels(tensorData, this.refs.canvas);
+        await imageModel.renderImageFromCamera(imageCapture, this.refs.canvas);
 
-        // Dispose of tensors we are finished with.
-        resized.dispose();
-        imageCapture.dispose();
-        imageData.dispose();
-        logits.dispose();
-        tensorData.dispose();
-    }
+        imageModel.dispose();
+        this.model.dispose();
 
-    processImage = async (image) => {
-        return tf.tidy(() => image.expandDims(0).toFloat().div(127).sub(1));
-    }
-
-    /**
-     * Computes the probabilities of the topK classes given logits by computing
-     * softmax to get probabilities and then sorting the probabilities.
-     * @param logits Tensor representing the logits from MobileNet.
-     * @param topK The number of top predictions to show.
-     */
-    getTopKClasses = async (values, topK) => {
-        const valuesAndIndices = [];
-        for (let i = 0; i < values.length; i++) {
-            valuesAndIndices.push({value: values[i], index: i});
-        }
-        valuesAndIndices.sort((a, b) => {
-            return b.value - a.value;
-        });
-        const topkValues = new Float32Array(topK);
-        const topkIndices = new Int32Array(topK);
-        for (let i = 0; i < topK; i++) {
-            topkValues[i] = valuesAndIndices[i].value;
-            topkIndices[i] = valuesAndIndices[i].index;
-        }
-
-        const topClassesAndProbs = [];
-        for (let i = 0; i < topkIndices.length; i++) {
-            topClassesAndProbs.push({
-                className: MODEL_CLASSES[topkIndices[i]],
-                probability: (topkValues[i] * 100).toFixed(2)
-            });
-        }
-        return topClassesAndProbs;
     }
 
     handlePanelClick = event => {
@@ -321,7 +163,7 @@ export default class Classify extends Component {
                         aria-controls="photo-selection-pane"
                         aria-expanded={this.state.photoSettingsOpen}
                     >
-                        Take or Select a Photo to Classify
+                        Take or Select a Photo to NewClassify
                         <span className='panel-arrow'>
             { this.state.photoSettingsOpen
                 ? <FaChevronDown />
@@ -341,7 +183,7 @@ export default class Classify extends Component {
                                     An update for the <strong>{this.state.modelType}</strong> model is available.
                                     <div className="d-flex justify-content-center pt-1">
                                         {!this.state.isDownloadingModel &&
-                                        <Button onClick={this.updateModel}
+                                        <Button onClick={this.actionUpdateModel}
                                                 variant="outline-info">
                                             Update
                                         </Button>
@@ -386,9 +228,9 @@ export default class Classify extends Component {
                                         <LoadButton
                                             variant="primary"
                                             size="lg"
-                                            onClick={this.classifyWebcamImage}
+                                            onClick={this.actionClassifyWebcamImage}
                                             isLoading={this.state.isClassifying}
-                                            text="Classify"
+                                            text="NewClassify"
                                             loadingText="Classifying..."
                                         />
                                     </div>
@@ -422,9 +264,9 @@ export default class Classify extends Component {
                                                 variant="primary"
                                                 size="lg"
                                                 disabled={!this.state.filename}
-                                                onClick={this.classifyLocalImage}
+                                                onClick={this.actionClassifyLocalImage}
                                                 isLoading={this.state.isClassifying}
-                                                text="Classify"
+                                                text="NewClassify"
                                                 loadingText="Classifying..."
                                             />
                                         </div>
@@ -454,4 +296,40 @@ export default class Classify extends Component {
             </div>
         );
     }
+
+    async initWebcam(webcam, noWebcam){
+
+        try {
+            this.webcam = await tf.data.webcam(
+                this.refs.webcam,
+                {resizeWidth: CANVAS_SIZE, resizeHeight: CANVAS_SIZE, facingMode: 'environment'}
+            );
+        }
+        catch (e) {
+            this.refs.noWebcam.style.display = 'block';
+        }
+
+        // try {
+        //     this.webcam = await tf.data.webcam(
+        //         webcam,
+        //         {resizeWidth: CANVAS_SIZE, resizeHeight: CANVAS_SIZE, facingMode: 'environment'}
+        //     );
+        // }
+        // catch (e) {
+        //     noWebcam.style.display = 'block';
+        // }
+    }
+
+    async startWebcam(){
+        if (this.webcam) {
+            this.webcam.start();
+        }
+    }
+
+    async stopWebcam(){
+        if (this.webcam) {
+            this.webcam.stop();
+        }
+    }
+    
 }

@@ -37,6 +37,7 @@ class App extends Component {
               <Navbar.Collapse id="basic-navbar-nav">
                 <Nav className="">
                   <Link className="nav-link" to="/">Classify</Link>
+                  <Link className="nav-link" to="/oldclassifier">Old Classify</Link>
                   <Link className="nav-link" to="/about">About</Link>
                 </Nav>
               </Navbar.Collapse>
